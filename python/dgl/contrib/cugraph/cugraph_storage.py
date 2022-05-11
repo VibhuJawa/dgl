@@ -49,7 +49,7 @@ class CuGraphStorage():
 
     def get_node_storage(self, key, ntype=None):
         node_col = self.graphstore.get_node_storage(key, ntype)
-        return torch.as_tensor(cupy.asarray(node_col))
+        return CuFeatureStorage(node_col)
 
     def get_edge_storage(self, key, etype=None):
         edge_col = self.graphstore.get_edge_storage(key, etype)
@@ -234,3 +234,14 @@ class CuGraphStorage():
         Per source negative sampling as in ``dgl.dataloading.GlobalUniform``
         """
         raise NotImplementedError("canonical not implemented")
+
+
+
+
+class CuFeatureStorage(dgl.storages.FeatureStorage):
+    def __init__(self, ndata_col):
+        self.ndata_col = ndata_col
+
+    def _fetch(self, indices, device, **kwargs):
+        return torch.as_tensor(cupy.asarray(self.ndata_col[indices]), device=torch.device(device))
+
