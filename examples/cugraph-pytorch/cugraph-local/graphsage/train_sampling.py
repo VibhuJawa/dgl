@@ -39,15 +39,6 @@ def evaluate(model, g, nfeat, labels, val_nid, device):
     return compute_acc(pred[val_nid], labels[val_nid].to(pred.device))
 
 
-def load_subtensor(nfeat, labels, seeds, input_nodes, device):
-    """
-    Extracts features and labels for a subset of nodes
-    """
-    batch_inputs = nfeat[input_nodes].to(device)
-    batch_labels = labels[seeds].to(device)
-    return batch_inputs, batch_labels
-
-
 # Entry point
 def run(args, device, data):
     # Unpack data
@@ -64,7 +55,8 @@ def run(args, device, data):
 
     # Create PyTorch DataLoader for constructing blocks
     sampler = dgl.dataloading.MultiLayerNeighborSampler(
-        [int(fanout) for fanout in args.fan_out.split(',')])
+        [int(fanout) for fanout in args.fan_out.split(',')],
+        prefetch_node_feats=['feat'], prefetch_labels=['label'])
 
     # their new dataloader will automatically call our graphsage.
     # no need to change this part
@@ -96,22 +88,19 @@ def run(args, device, data):
         tic_step = time.time()
         for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
             # Load the input features as well as output labels
-            batch_inputs, batch_labels = load_subtensor(train_nfeat,
-                                                        train_labels,
-                                                        seeds, input_nodes,
-                                                        device)
-            blocks = [block.int().to(device) for block in blocks]
-
+            #blocks = [block.int().to(device) for block in blocks]
+            x = blocks[0].srcdata['feat']
+            y = blocks[-1].dstdata['label']
             # Compute loss and prediction
-            batch_pred = model(blocks, batch_inputs)
-            loss = loss_fcn(batch_pred, batch_labels)
+            y_hat = model(blocks, x)
+            loss = loss_fcn(y_hat, y)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             iter_tput.append(len(seeds) / (time.time() - tic_step))
             if step % args.log_every == 0:
-                acc = compute_acc(batch_pred, batch_labels)
+                acc = compute_acc(y_hat, y)
                 # gpu_mem_alloc = th.cuda.max_memory_allocated() / 1000000 \
                 #                if th.cuda.is_available() else 0
                 print('Epoch {: 05d} | Step {: 05d} | Loss {: .4f} | Train Acc {: .4f} | Speed (samples/sec) {: .4f}'.format(
