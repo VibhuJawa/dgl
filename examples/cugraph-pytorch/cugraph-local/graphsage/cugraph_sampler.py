@@ -152,7 +152,7 @@ if __name__ == "__main__":
     ]  # , 'as-Skitter', 'citationCiteseer', 'caidaRouterLevel', 'coAuthorsDBLP', 'coPapersDBLP']
     for file_name in data:
         G_cu = read_and_create(
-            "/home/nfs/vjawa/dgl/" + file_name + ".mtx"
+            '/home/xiaoyunw/cugraph/datasets/' + file_name + '.mtx'
         )
         nodes = G_cu.nodes()  # .to_array().tolist()
         # print(nodes.index)
