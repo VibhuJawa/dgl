@@ -13,37 +13,76 @@
 
 # Utils to convert b/w dgl heterograph to cugraph GraphStore
 from typing import Optional
-import cudf
-import cupy as cp
-import dask_cudf
 import dgl
 import torch
 from dgl.backend import zerocopy_to_dlpack
 
+import numpy as np
+import cupy as cp
+import dask_cudf
+import dask.dataframe as dd
+import cudf
+import pandas as pd
 
 # Feature Tensor to DataFrame Utils
 def convert_to_column_major(t: torch.Tensor):
     return t.t().contiguous().t()
 
 
-def create_feature_frame(feat_t_d: dict[str, torch.Tensor]) -> cudf.DataFrame:
+def add_1d_tensor_to_dataframe(df, t, col_name):
+    if t.device.type == 'cpu':
+        ar = t.numpy()
+    else:
+        ar = cp.from_dlpack(zerocopy_to_dlpack(t))
+    if isinstance(df, dask_cudf.DataFrame):
+        # Need to send to GPU to cleanly distributed
+        # FIXME: Can be removed if becomes a bottlenec
+        if isinstance(ar, cp.ndarray):
+            ar = ar.get()
+        ar_ser = pd.Series(ar)
+        dask_pandas_ser = dd.from_pandas(ar_ser, df.npartitions)
+        dask_cudf_ser = dask_pandas_ser.map_partitions(cudf.from_pandas)
+        df[col_name] = dask_cudf_ser
+    elif isinstance(df, cudf.DataFrame):
+        cudf_ser = cudf.Series(ar)
+        df[col_name] = cudf_ser
+    else:
+        raise ValueError("Only adding to dask_cudf.DataFrame and cudf.DataFrame is currently supported")
+
+
+def create_feature_frame(feat_t_d: dict[str, torch.Tensor], single_gpu=True):
     """
     Convert a feature_tensor_d to a dataframe
     """
     df_ls = []
     feat_name_map = {}
     for feat_key, feat_t in feat_t_d.items():
-        feat_t = feat_t.to("cuda")
-        feat_t = convert_to_column_major(feat_t)
-        ar = cp.from_dlpack(zerocopy_to_dlpack(feat_t))
-        del feat_t
-        df = cudf.DataFrame(ar)
-        feat_columns = [f"{feat_key}_{i}" for i in range(len(df.columns))]
-        df.columns = feat_columns
-        feat_name_map[feat_key] = feat_columns
+        
+        if single_gpu:
+            # Create single GPU cudf dataframes
+            feat_t = feat_t.to("cuda")
+            feat_t = convert_to_column_major(feat_t)
+            ar = cp.from_dlpack(zerocopy_to_dlpack(feat_t))
+            del feat_t
+            df = cudf.DataFrame(ar)
+            feat_columns = [f"{feat_key}_{i}" for i in range(len(df.columns))]
+            df.columns = feat_columns
+        else:
+            # Create Multi-gpu dask_cudf dataframes
+            ar = feat_t.numpy()
+            df = pd.DataFrame(ar)
+            feat_columns = [f"{feat_key}_{i}" for i in range(len(df.columns))]
+            df.columns = feat_columns
+            df = dd.from_pandas(df, npartitions=16)
+            # Send to GPU only after distributing across partitions
+            df = df.map_partitions(cudf.from_pandas)
+        feat_name_map[feat_key] = df.columns
         df_ls.append(df)
 
-    df = cudf.concat(df_ls, axis=1)
+    if isinstance(df_ls[0], cudf.DataFrame):
+        df = cudf.concat(df_ls, axis=1)
+    else:
+        df = dask_cudf.concat(df_ls, axis=1)
     return df, feat_name_map
 
 
@@ -55,12 +94,9 @@ def add_ndata_of_single_type(
     n_rows: int,
     idtype=torch.int64,
 ):
-    node_ids = dgl.backend.arange(0, n_rows, idtype, ctx="cuda")
-    node_ids = cp.from_dlpack(zerocopy_to_dlpack(node_ids))
-    df, feat_name_map = create_feature_frame(feat_t_d)
-    df["node_id"] = node_ids
-    if not gs.single_gpu:
-        df = dask_cudf.from_cudf(df, npartitions=16)
+    node_ids = dgl.backend.arange(0, n_rows, idtype)
+    df, feat_name_map = create_feature_frame(feat_t_d, gs.single_gpu)
+    add_1d_tensor_to_dataframe(df, node_ids, "node_id")
     gs.add_node_data(
         df,
         "node_id",
@@ -100,7 +136,7 @@ def add_nodes_from_dgl_heteroGraph(
             feat_t_d=graph.ndata,
             ntype=ntype,
             n_rows=graph.number_of_nodes(),
-            idtype=graph.idtype,
+            idtype=graph.idtype
         )
     return gs
 
@@ -113,22 +149,10 @@ def add_edata_of_single_type(
     dst_t: torch.Tensor,
     can_etype: tuple([str, str, str]),
 ):
-
-    src_t = src_t.to("cuda")
-    dst_t = dst_t.to("cuda")
-
-    df = cudf.DataFrame(
-        {
-            "src": cudf.from_dlpack(zerocopy_to_dlpack(src_t)),
-            "dst": cudf.from_dlpack(zerocopy_to_dlpack(dst_t)),
-        }
-    )
     if feat_t_d:
-        feat_df, feat_name_map = create_feature_frame(feat_t_d)
-        df = cudf.concat([df, feat_df], axis=1)
-        if not gs.single_gpu:
-            df = dask_cudf.from_cudf(df, npartitions=16)
-
+        feat_df, feat_name_map = create_feature_frame(feat_t_d, gs.single_gpu)
+        add_1d_tensor_to_dataframe(feat_df, src_t, 'src')
+        add_1d_tensor_to_dataframe(feat_df, dst_t, 'dst')
         gs.add_edge_data(
             df,
             ["src", "dst"],
@@ -137,6 +161,12 @@ def add_edata_of_single_type(
             contains_vector_features=True,
         )
     else:
+        # TODO: Fix this
+        df = cudf.DataFrame(
+        {
+            "src": cudf.from_dlpack(zerocopy_to_dlpack(src_t)),
+            "dst": cudf.from_dlpack(zerocopy_to_dlpack(dst_t)),
+        })
         if not gs.single_gpu:
             df = dask_cudf.from_cudf(df, npartitions=16)
 
