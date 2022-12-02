@@ -67,7 +67,9 @@ def evaluate(model, graph, dataloader):
             x = blocks[0].srcdata['feat']
             ys.append(blocks[-1].dstdata['label'])
             y_hats.append(model(blocks, x))
-    return MF.accuracy(torch.cat(y_hats), torch.cat(ys))
+            
+    num_classes = y_hats[0].shape[1]
+    return MF.accuracy(torch.cat(y_hats), torch.cat(ys), task='multiclass', num_classes=num_classes)
 
 def layerwise_infer(device, graph, nid, model, batch_size):
     model.eval()
@@ -75,7 +77,8 @@ def layerwise_infer(device, graph, nid, model, batch_size):
         pred = model.inference(graph, device, batch_size) # pred in buffer_device
         pred = pred[nid]
         label = graph.ndata['label'][nid].to(pred.device)
-        return MF.accuracy(pred, label)
+        num_classes = label.shape[1]
+        return MF.accuracy(pred, label, task='multiclass', num_classes=num_classes)
 
 def train(args, device, g, dataset, model):
     # create sampler & dataloader
